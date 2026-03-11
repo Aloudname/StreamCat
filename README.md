@@ -11,17 +11,17 @@ bash
 # 按config/config.yaml配置运行(webcam + ONNX fallback)
 python run_stream.py
 
-# 自定义配置运行：
-python run_stream.py -c
+# 自定义配置运行，见第3、4、5条：
+python run_stream.py -c <自定义参数>
 
 # 后端用Triton：
-python run_stream.py --backend triton --triton-url localhost:8001
+python run_stream.py -c < --backend / -b > triton < --triton-url / -url > localhost:8001
 
 # 实时视频流做输入：
-python run_stream.py --source /path/to/video.mp4
+python run_stream.py -c < --source / -s > /path/to/video.mp4
 
 # 帧间隔(stride)为8，限宽1920：
-python run_stream.py --stride 8 --max-width 1920
+python run_stream.py -c < --stride / -stride > 8 < --max-width / -mw > 1920
 
 ```
 ### 工作流
