@@ -50,7 +50,7 @@ def parse_args():
                         help='Path to ONNX model file')
     parser.add_argument('--model-name', '-n', type=str, default=None,
                         help='Triton model name')
-    parser.add_argument('--batch-size', '-b', type=int, default=None,
+    parser.add_argument('--batch-size', '-bs', type=int, default=None,
                         help='Inference batch size')
 
     # Preprocess overrides
