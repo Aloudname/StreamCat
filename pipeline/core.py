@@ -31,13 +31,12 @@ from pipeline.capture import CaptureSource
 from pipeline.display import StreamDisplay
 from pipeline.postprocess import TileStitcher
 from pipeline.preprocess import StreamPreprocessor
+from pipeline.monitor import LatencyTracker, StMonitor
 from pipeline.inference import InferClient, batched_infer
-from pipeline.monitor import LatencyTracker, StreamMonitor
 from pipeline.packets import FramePacket, InferPacket, ResultPacket
-# ---------------------------------------------------------------------------
-# Drop-oldest bounded queue
-# ---------------------------------------------------------------------------
 
+
+# Drop-oldest bounded queue
 class LatestQueue:
     """Bounded thread-safe queue that discards the oldest item when full.
 
@@ -84,12 +83,9 @@ class LatestQueue:
             return len(self._deque)
 
 
-# ---------------------------------------------------------------------------
-# Pipeline orchestrator
-# ---------------------------------------------------------------------------
-
+# Pipeline
 class StreamPipeline:
-    """Main orchestrator for the real-time streaming pipeline.
+    """Pipeline for the real-time streaming pipeline.
 
     Instantiation wires up all stages from a single YAML config.
     ``run()`` is blocking and drives the display loop on the main thread.
@@ -151,7 +147,7 @@ class StreamPipeline:
         # Monitor
         self._tracker = LatencyTracker(
             window_size=config.monitor.latency_window)
-        self._monitor = StreamMonitor(
+        self._monitor = StMonitor(
             tracker=self._tracker,
             stop_event=self._stop_event,
             interval_sec=config.monitor.log_interval_sec,
@@ -159,10 +155,8 @@ class StreamPipeline:
 
         tprint("[orchestrator] pipeline assembled")
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
+    # Public API
     def run(self) -> None:
         """Start all threads and run the display loop (blocking).
 
@@ -208,10 +202,7 @@ class StreamPipeline:
             self._display.release()
             tprint("[orchestrator] shutdown complete")
 
-    # ------------------------------------------------------------------
     # Thread bodies
-    # ------------------------------------------------------------------
-
     def _capture_loop(self) -> None:
         """Background: continuously grab the latest frame and enqueue."""
         while not self._stop_event.is_set():

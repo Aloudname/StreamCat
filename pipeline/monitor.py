@@ -17,7 +17,6 @@ import numpy as np
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Dict, Optional
-from pipeline.monitor import tprint
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 import os, time, psutil, argparse, threading, subprocess, warnings

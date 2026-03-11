@@ -8,7 +8,7 @@ from pipeline.inference import (InferClient, TritonClient, OnnxClient,
 from pipeline.postprocess import TileStitcher
 from pipeline.display import StreamDisplay
 from pipeline.core import (StreamPipeline, LatestQueue)
-from pipeline.monitor import (LatencyTracker, StreamMonitor)
+from pipeline.monitor import (LatencyTracker, StMonitor, tprint, RcrsMonitor)
 
 __all__ = [
     # data packets
@@ -32,5 +32,7 @@ __all__ = [
 
     # monitoring
     'LatencyTracker',
-    'StreamMonitor',
+    'StMonitor',
+    'tprint',
+    'RcrsMonitor'
 ]
