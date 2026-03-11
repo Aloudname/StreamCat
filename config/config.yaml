@@ -1,0 +1,61 @@
+# config/config_stream.yaml
+# Streaming pipeline configuration for real-time inference.
+# Separate from training config (config.yaml) to avoid coupling.
+
+capture:
+  source: 0                    # 0 = default webcam, or path to video file
+  width: 640
+  height: 480
+  fps: 30
+  reconnect_attempts: 5
+  reconnect_delay_sec: 1.0
+
+preprocess:
+  patch_size: 31               # must match the model's training patch_size
+  stride: 16                   # overlap = patch_size - stride = 15
+  normalize_mode: "simple"     # "simple" (div 255) or "hs" (z-score + PCA)
+  preprocessor_path: ""        # path to pickled HSPreprocessor (for "hs" mode)
+
+inference:
+  backend: "onnx"              # "triton" or "onnx" (local ONNX Runtime fallback)
+  # triton settings
+  triton_url: "localhost:8001"
+  triton_protocol: "grpc"      # "grpc" or "http"
+  model_name: "common_mini"
+  model_version: ""            # empty = latest
+  # onnx fallback settings
+  onnx_path: "output/common_mini_exp/models/common_mini_exp_best.onnx"
+  # common
+  batch_size: 64               # max tiles per single inference call
+  timeout_ms: 5000
+  input_name: "input"
+  output_name: "output"
+
+postprocess:
+  num_classes: 2
+  class_names:
+    - "PG"
+    - "TG"
+  fusion_mode: "average"       # "average" or "gaussian"
+  confidence_threshold: 0.3
+  morphology_kernel: 0         # 0 = disabled, odd int > 0 for opening kernel
+
+display:
+  window_name: "LoLA hsViT Stream"
+  overlay_alpha: 0.45
+  show_fps: true
+  show_latency: true
+  show_class_legend: true
+  colormap:                    # per-class BGR colors
+    - [0, 200, 0]              # PG: green
+    - [0, 0, 200]              # TG: red
+  max_display_width: 1280      # resize for display if frame exceeds this
+
+pipeline:
+  queue_maxsize: 2             # bounded queue depth (drop-oldest semantics)
+  warmup_frames: 5             # discard first N capture frames
+
+monitor:
+  enable: true
+  log_interval_sec: 5.0
+  latency_window: 100          # rolling window for latency statistics

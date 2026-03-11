@@ -1,0 +1,590 @@
+# stream_monitor.py — Latency profiling and throughput monitoring.
+#
+# Provides thread-safe rolling-window latency tracking and a periodic
+# monitoring thread that logs pipeline health to stdout.
+#
+# Usage:
+#     tracker = LatencyTracker(window_size=100)
+#     tracker.record("preprocess", 3.2)
+#     tracker.record("inference", 12.5)
+#     print(tracker.summary())
+
+import time
+import threading
+import collections
+import numpy as np
+
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, Optional
+from pipeline.monitor import tprint
+from contextlib import contextmanager
+from typing import Dict, List, Optional, Tuple
+import os, time, psutil, argparse, threading, subprocess, warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+class LatencyTracker:
+    """Thread-safe rolling-window latency tracker.
+
+    Records per-stage durations in milliseconds and computes
+    min / mean / p95 / max over the most recent ``window_size`` samples.
+    """
+
+    def __init__(self, window_size: int = 100):
+        self._window_size = window_size
+        self._data: Dict[str, collections.deque] = {}
+        self._lock = threading.Lock()
+        self._frame_counter = 0
+
+    def record(self, stage: str, duration_ms: float) -> None:
+        """Append a latency sample for *stage*."""
+        with self._lock:
+            if stage not in self._data:
+                self._data[stage] = collections.deque(maxlen=self._window_size)
+            self._data[stage].append(duration_ms)
+
+    def tick_frame(self) -> None:
+        """Increment the global frame counter (call once per displayed frame)."""
+        with self._lock:
+            self._frame_counter += 1
+
+    @property
+    def frame_count(self) -> int:
+        with self._lock:
+            return self._frame_counter
+
+    def stats(self, stage: str) -> Dict[str, float]:
+        """Return min/mean/p95/max for *stage*, or zeros if no data."""
+        with self._lock:
+            buf = self._data.get(stage)
+            if not buf:
+                return {"min": 0, "mean": 0, "p95": 0, "max": 0, "n": 0}
+            arr = np.array(buf)
+        return {
+            "min": float(arr.min()),
+            "mean": float(arr.mean()),
+            "p95": float(np.percentile(arr, 95)),
+            "max": float(arr.max()),
+            "n": len(arr),
+        }
+
+    def all_stages(self):
+        """Return a sorted list of all recorded stage names."""
+        with self._lock:
+            return sorted(self._data.keys())
+
+    def summary(self) -> str:
+        """One-line summary of all stages: ``stage mean(p95) | ...``"""
+        parts = []
+        for stage in self.all_stages():
+            s = self.stats(stage)
+            parts.append(f"{stage} {s['mean']:.1f}({s['p95']:.1f})")
+        return " | ".join(parts) if parts else "(no data)"
+
+
+class StMonitor:
+    """Periodic monitoring daemon that prints pipeline health.
+
+    Runs on a background thread, logs every ``interval_sec`` seconds.
+    Automatically stops when the pipeline's ``stop_event`` is set.
+
+    Usage::
+
+        mon = StMonitor(tracker, stop_event, interval_sec=5.0)
+        mon.start()
+        # ... pipeline runs ...
+        mon.stop()
+    """
+
+    def __init__(self,
+                 tracker: LatencyTracker,
+                 stop_event: threading.Event,
+                 interval_sec: float = 5.0):
+        self._tracker = tracker
+        self._stop = stop_event
+        self._interval = interval_sec
+        self._thread: Optional[threading.Thread] = None
+        self._last_frame_count = 0
+        self._last_time = 0.0
+
+    def start(self) -> None:
+        self._last_frame_count = self._tracker.frame_count
+        self._last_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="StreamMonitor")
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=self._interval + 1)
+
+    def _run(self) -> None:
+        while not self._stop.wait(timeout=self._interval):
+            now = time.monotonic()
+            frames = self._tracker.frame_count
+            dt = now - self._last_time
+            fps = (frames - self._last_frame_count) / dt if dt > 0 else 0
+            self._last_frame_count = frames
+            self._last_time = now
+
+            tprint(f"[monitor] fps={fps:.1f}  {self._tracker.summary()}")
+
+#!/usr/bin/env python3
+"""
+Monitor GPU and memory.
+"""
+
+def tprint(*args, **kwargs):
+    """Print with [HH:MM:SS] timestamp prefix."""
+    print(datetime.now().strftime('[%H:%M:%S]'), *args, **kwargs)
+
+@contextmanager
+def _managed_pool(max_workers: int, desc: str):
+    """Ensure process pool is always shut down, even on Ctrl+C.
+
+    Cancels pending tasks on interruption to avoid lingering child processes
+    or leaked shared memory segments.
+    """
+    pool = ProcessPoolExecutor(max_workers=max_workers)
+    try:
+        yield pool
+    except KeyboardInterrupt:
+        tprint(f"{desc} interrupted, cancelling pending tasks...")
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    except Exception:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+@dataclass
+class MemorySnapshot:
+    timestamp: str
+    sys_used_gb: float
+    sys_available_gb: float
+    sys_percent: float
+    sys_total_gb: float
+    process_mb: float
+    process_percent: float
+    gpu_allocated_gb: Optional[float] = None
+    gpu_reserved_gb: Optional[float] = None
+    gpu_total_gb: Optional[float] = None
+    gpu_percent: Optional[float] = None
+    gpu_temp: Optional[float] = None
+    gpu_util: Optional[float] = None
+    peak_sys_gb: float = 0.0
+    peak_gpu_gb: float = 0.0
+
+
+class RcrsMonitor:
+    """
+    Monitor GPU and memory usage.
+    """
+    
+    def __init__(self, 
+                 log_file: str = f"output/logs/{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log",
+                 interval: float = 2.0,
+                 gpu_ids: Optional[List[int]] = None,
+                 show_gpu_process: bool = True,
+                 threshold_warning: float = 80.0,
+                 threshold_critical: float = 90.0,
+                 enable_gpu: bool = True,
+                 enable_log: bool = False):
+        
+        self.log_file = log_file
+        self.interval = interval
+        self.monitoring = False
+        self.memory_snapshots: List[MemorySnapshot] = []
+        self.peak_sys_memory = 0.0
+        self.peak_gpu_memory = 0.0
+        self.enable_gpu = enable_gpu and self._check_gpu_available()
+        self.enable_log = enable_log
+        
+        self.gpu_ids = gpu_ids
+        self.show_gpu_process = show_gpu_process
+        self.threshold_warning = threshold_warning
+        self.threshold_critical = threshold_critical
+        self.gpu_handles = {}
+        self.gpu_device_count = 0
+        
+        if self.enable_gpu:
+            self._init_gpu_monitor()
+    
+    def _check_gpu_available(self) -> bool:
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            raise ImportError("torch.cuda not available for GPU monitoring.")
+    
+    def _init_gpu_monitor(self):
+        self._gpu_backend = None  # 'pynvml' or 'torch'
+        
+        # Try pynvml first (provides temperature, utilization, per-process info)
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self.gpu_device_count = pynvml.nvmlDeviceGetCount()
+            
+            if self.gpu_ids is None:
+                self.gpu_ids = list(range(self.gpu_device_count))
+            else:
+                self.gpu_ids = [i for i in self.gpu_ids if i < self.gpu_device_count]
+            
+            if not self.gpu_ids:
+                print("No valid GPU, disable GPU monitoring.")
+                self.enable_gpu = False
+                return
+            
+            for gpu_id in self.gpu_ids:
+                self.gpu_handles[gpu_id] = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+            
+            self._gpu_backend = 'pynvml'
+            print(f" GPU monitor initialized (pynvml) with {len(self.gpu_ids)} GPU monitored.")
+            
+        except Exception as e:
+            print(f"pynvml unavailable ({e}), falling back to torch.cuda...")
+            # Fallback to torch.cuda
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self.gpu_device_count = torch.cuda.device_count()
+                    if self.gpu_ids is None:
+                        self.gpu_ids = list(range(self.gpu_device_count))
+                    else:
+                        self.gpu_ids = [i for i in self.gpu_ids if i < self.gpu_device_count]
+                    
+                    if self.gpu_ids:
+                        self._gpu_backend = 'torch'
+                        print(f" GPU monitor initialized (torch.cuda) with {len(self.gpu_ids)} GPU monitored.")
+                    else:
+                        print("No valid GPU, disable GPU monitoring.")
+                        self.enable_gpu = False
+                else:
+                    print("torch.cuda not available, disable GPU monitoring.")
+                    self.enable_gpu = False
+            except Exception as e2:
+                print(f"torch.cuda fallback also failed ({e2}), disable GPU monitoring.")
+                self.enable_gpu = False
+    
+    def get_system_memory(self) -> Dict[str, float]:
+        mem = psutil.virtual_memory()
+        return {
+            'used': mem.used / (1024**3),
+            'available': mem.available / (1024**3),
+            'total': mem.total / (1024**3),
+            'percent': mem.percent
+        }
+    
+    def get_gpu_memory_pynvml(self) -> List[Dict]:
+        if not self.enable_gpu:
+            return []
+        
+        try:
+            import pynvml
+            gpu_info = []
+            
+            for gpu_id in self.gpu_ids:
+                handle = self.gpu_handles[gpu_id]
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                
+                processes = []
+                if self.show_gpu_process:
+                    try:
+                        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                        for proc in procs:
+                            try:
+                                cmdline = subprocess.check_output(
+                                    ['ps', '-p', str(proc.pid), '-o', 'cmd='],
+                                    universal_newlines=True
+                                ).strip()
+                                cmdline = cmdline[:50] + '...' if len(cmdline) > 50 else cmdline
+                            except:
+                                cmdline = 'Unknown'
+                            
+                            processes.append({
+                                'pid': proc.pid,
+                                'used_memory': proc.usedGpuMemory / (1024**3),
+                                'cmd': cmdline
+                            })
+                    except:
+                        pass
+                
+                used_gb = memory_info.used / (1024**3)
+                total_gb = memory_info.total / (1024**3)
+                percent = (used_gb / total_gb) * 100 if total_gb > 0 else 0
+                
+                gpu_info.append({
+                    'gpu_id': gpu_id,
+                    'used': used_gb,
+                    'total': total_gb,
+                    'percent': percent,
+                    'util': utilization.gpu,
+                    'mem_util': utilization.memory,
+                    'temp': temperature,
+                    'processes': processes
+                })
+            
+            return gpu_info
+            
+        except Exception as e:
+            print(f"Fail to get GPU info: {e}")
+            return []
+    
+    def get_gpu_memory_torch(self) -> List[Dict]:
+        try:
+            import torch
+            gpu_info = []
+            
+            for gpu_id in self.gpu_ids:
+                if gpu_id < torch.cuda.device_count():
+                    allocated = torch.cuda.memory_allocated(gpu_id) / (1024**3)
+                    reserved = torch.cuda.memory_reserved(gpu_id) / (1024**3)
+                    total = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
+                    
+                    gpu_info.append({
+                        'gpu_id': gpu_id,
+                        'allocated': allocated,
+                        'reserved': reserved,
+                        'total': total,
+                        'percent': (allocated / total) * 100 if total > 0 else 0
+                    })
+            
+            return gpu_info
+            
+        except:
+            return []
+    
+    def get_gpu_memory(self) -> List[Dict]:
+        if self._gpu_backend == 'pynvml':
+            try:
+                return self.get_gpu_memory_pynvml()
+            except:
+                return self.get_gpu_memory_torch()
+        elif self._gpu_backend == 'torch':
+            return self.get_gpu_memory_torch()
+        return []
+    
+    def get_process_memory(self, pid: Optional[int] = None) -> Tuple[float, float]:
+        if pid is None:
+            pid = os.getpid()
+        try:
+            process = psutil.Process(pid)
+            mem_info = process.memory_info()
+            mem_percent = process.memory_percent()
+            return mem_info.rss / (1024**3), mem_percent
+        except:
+            return 0.0, 0.0
+    
+    def take_snapshot(self) -> MemorySnapshot:
+        sys_mem = self.get_system_memory()
+        proc_mem_gb, proc_percent = self.get_process_memory()
+        gpu_info = self.get_gpu_memory() if self.enable_gpu else []
+        
+        self.peak_sys_memory = max(self.peak_sys_memory, sys_mem['used'])
+        
+        snapshot = MemorySnapshot(
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            sys_used_gb=sys_mem['used'],
+            sys_available_gb=sys_mem['available'],
+            sys_percent=sys_mem['percent'],
+            sys_total_gb=sys_mem['total'],
+            process_mb=proc_mem_gb * 1024,
+            process_percent=proc_percent,
+            peak_sys_gb=self.peak_sys_memory
+        )
+        
+        if gpu_info:
+            # pynvml returns 'used', torch returns 'allocated' — normalise
+            total_used = sum(g.get('used', g.get('allocated', 0)) for g in gpu_info)
+            total_total = sum(g['total'] for g in gpu_info)
+            avg_percent = (total_used / total_total) * 100 if total_total > 0 else 0
+            
+            snapshot.gpu_allocated_gb = total_used
+            snapshot.gpu_total_gb = total_total
+            snapshot.gpu_percent = avg_percent
+            
+            self.peak_gpu_memory = max(self.peak_gpu_memory, total_used)
+            snapshot.peak_gpu_gb = self.peak_gpu_memory
+            
+            if gpu_info[0].get('temp'):
+                snapshot.gpu_temp = gpu_info[0]['temp']
+            if gpu_info[0].get('util'):
+                snapshot.gpu_util = gpu_info[0]['util']
+        
+        self.memory_snapshots.append(snapshot)
+        return snapshot
+    
+    def get_color(self, percent: float) -> str:
+        if percent >= self.threshold_critical:
+            return '\033[91m'
+        elif percent >= self.threshold_warning:
+            return '\033[93m'
+        else:
+            return '\033[92m'
+    
+    def get_progress_bar(self, percent: float, width: int = 30) -> str:
+        filled = int(width * percent / 100)
+        bar = '█' * filled + '░' * (width - filled)
+        color = self.get_color(percent)
+        return f"{color}{bar}\033[0m"
+    
+    def display_snapshot(self, snapshot: MemorySnapshot):
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+        # header
+        print(f'\033[1;33m Resource monitoring - {snapshot.timestamp} | interval: {self.interval}s | if_log: {self.enable_log}\033[0m')
+        
+        sys_bar = self.get_progress_bar(snapshot.sys_percent)
+        sys_color = self.get_color(snapshot.sys_percent)
+        print(f'\n\033[1;34mSystem memory (RAM):\033[0m')
+        print(f'  [{sys_bar}] {sys_color}{snapshot.sys_percent:.1f}%\033[0m')
+        print(f'  ├─ Used: {sys_color}{snapshot.sys_used_gb:.1f}GB\033[0m / {snapshot.sys_total_gb:.1f}GB')
+        print(f'  ├─ Available: {snapshot.sys_available_gb:.1f}GB')
+        print(f'  └─ Process memory: {snapshot.process_mb:.0f}MB ({snapshot.process_percent:.1f}%)')
+        
+        if snapshot.gpu_total_gb:
+            gpu_bar = self.get_progress_bar(snapshot.gpu_percent)
+            gpu_color = self.get_color(snapshot.gpu_percent)
+            print(f'\n\033[1;35m GPU memory:\033[0m')
+            print(f'  [{gpu_bar}] {gpu_color}{snapshot.gpu_percent:.1f}%\033[0m')
+            print(f'  ├─ Allocated: {gpu_color}{snapshot.gpu_allocated_gb:.1f}GB\033[0m / {snapshot.gpu_total_gb:.1f}GB')
+            
+            if snapshot.gpu_temp is not None:
+                temp_color = self.get_temp_color(snapshot.gpu_temp)
+                print(f'  ├─ GPU temperature: {temp_color}{snapshot.gpu_temp:.0f}°C\033[0m')
+            
+            if snapshot.gpu_util is not None:
+                print(f'  └─ Occupation rate: {snapshot.gpu_util:.0f}%')
+            elif snapshot.gpu_util is None:
+                print(f'  └─ Occupation rate: 0')
+        else:
+            print(f'\n\033[1;35m GPU memory undefined\033[0m')
+        
+        print(f'\n\033[1;33m Peaks:\033[0m')
+        peak_sys_color = self.get_color((snapshot.peak_sys_gb / snapshot.sys_total_gb) * 100)
+        print(f'  ├─ System memory peak: {peak_sys_color}{snapshot.peak_sys_gb:.1f}GB\033[0m')
+        
+        if snapshot.peak_gpu_gb > 0:
+            peak_gpu_color = self.get_color((snapshot.peak_gpu_gb / snapshot.gpu_total_gb) * 100)
+            print(f'  └─ GPU memory peak: {peak_gpu_color}{snapshot.peak_gpu_gb:.1f}GB\033[0m')
+        
+        print(f'\n\033[1;30m Got {len(self.memory_snapshots)} samples | Press Ctrl+C to stop\033[0m')
+    
+    def get_temp_color(self, temp: float) -> str:
+        if temp >= 85:
+            return '\033[91m'  # red
+        elif temp >= 75:
+            return '\033[93m'  # yellow
+        else:
+            return '\033[92m'  # green
+    
+    def start_monitoring(self):
+        self.monitoring = True
+        
+        def monitor_loop():
+            while self.monitoring:
+                snapshot = self.take_snapshot()
+                self.display_snapshot(snapshot)
+                time.sleep(self.interval)
+        
+        monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        monitor_thread.start()
+        print(f"monitor starts with interval {self.interval}s.")
+    
+    def stop_monitoring(self):
+        self.monitoring = False
+        print("\nmonitoring stopped.")
+        if self.enable_log:
+            self.save_log()
+    
+    def get_summary(self, enable:bool = False) -> List[str]:
+        if enable:
+            try:
+                import torch
+                summary = ['Sys Summary:\n']
+                for device in range(self.gpu_device_count):
+                    info = f"GPU {device}:" + torch.cuda.memory_summary(device=device) + '\n'
+                    summary.append(info)
+            except Exception as e:
+                print(f"Error occurred while generating summary: {e}")
+            return summary
+        else:
+            return []
+
+    def save_log(self):
+        """
+        save as log.
+        """
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        with open(self.log_file, 'w') as f:
+            f.write(f"\n")
+            f.write(f"Start at: {self.memory_snapshots[0].timestamp if self.memory_snapshots else 'N/A'}\n")
+            f.write(f"Terminate at: {self.memory_snapshots[-1].timestamp if self.memory_snapshots else 'N/A'}\n")
+            f.write(f"Sample interval: {self.interval}s\n")
+            f.write(f"Total samples: {len(self.memory_snapshots)}\n")
+                
+            # table head
+            f.write("Timestamp          | RAM_Used(GB) | RAM_Avail(GB) | RAM_%  | Proc_MB | GPU_Used(GB) | GPU_%  | GPU_Temp\n\n")
+            
+            for s in self.memory_snapshots:
+                gpu_str = f"{s.gpu_allocated_gb:.1f}/{s.gpu_total_gb:.1f}" if s.gpu_allocated_gb else "N/A"
+                gpu_percent = f"{s.gpu_percent:.1f}%" if s.gpu_percent else "N/A"
+                gpu_temp = f"{s.gpu_temp:.0f}°C" if s.gpu_temp else "N/A"
+                
+                f.write(f"{s.timestamp} | {s.sys_used_gb:>10.1f} | {s.sys_available_gb:>11.1f} | "
+                        f"{s.sys_percent:>5.1f} | {s.process_mb:>7.0f} | {gpu_str:>13} | "
+                        f"{gpu_percent:>6} | {gpu_temp:>7}\n")
+
+            summary = self.get_summary(enable=False)
+            for info in summary:
+                f.write(f"  {info}\n")
+
+        print(f"Log saved at {self.log_file}")
+
+
+def monitor():
+    parser = argparse.ArgumentParser(description='GPU and memory monitor')
+    parser.add_argument('--interval', '-i', type=float, default=2.0, help='monitor interval (seconds)')
+    parser.add_argument('--log', '-l', action='store_true', help='enable logging')
+    parser.add_argument('--gpus', type=str, default='all', help='gpu ids to monitor, separated by commas')
+    parser.add_argument('--no-gpu', action='store_true', help='disable gpu monitoring')
+    parser.add_argument('--no-process', action='store_true', help='disable gpu process monitoring')
+    parser.add_argument('--warning', type=float, default=80.0, help='warning threshold (percentage)')
+    parser.add_argument('--critical', type=float, default=90.0, help='critical threshold (percentage)')
+    
+    
+    args = parser.parse_args()
+    
+    if args.gpus.lower() == 'all':
+        gpu_ids = None
+    else:
+        gpu_ids = [int(x.strip()) for x in args.gpus.split(',')]
+    
+    monitor = RcrsMonitor(
+        interval=args.interval,
+        gpu_ids=gpu_ids,
+        show_gpu_process=not args.no_process,
+        threshold_warning=args.warning,
+        threshold_critical=args.critical,
+        enable_gpu=not args.no_gpu,
+        enable_log=args.log
+    )
+    
+    try:
+        monitor.start_monitoring()
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        monitor.stop_monitoring()
+        
+if __name__ == "__main__":
+    monitor()
