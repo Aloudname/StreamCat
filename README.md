@@ -23,6 +23,7 @@ python run_stream.py -c < --source / -s > /path/to/video.mp4
 # 帧间隔(stride)为8，限宽1920：
 python run_stream.py -c < --stride / -stride > 8 < --max-width / -mw > 1920
 
+# 其它自定义参数见run.py
 ```
 ### 工作流
 
