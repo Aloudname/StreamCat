@@ -3,7 +3,7 @@
 from pipeline.packets import (FramePacket, InferPacket, ResultPacket)
 from pipeline.capture import CaptureSource
 from pipeline.preprocess import StreamPreprocessor
-from pipeline.inference import (InferClient, TritonClient, OnnxClient,
+from pipeline.inference import (InferClient, MonaiClient, OnnxClient, GrpcClient,
                                   batched_infer)
 from pipeline.postprocess import TileStitcher
 from pipeline.display import StreamDisplay
@@ -20,8 +20,9 @@ __all__ = [
     'CaptureSource',
     'StreamPreprocessor',
     'InferClient',
-    'TritonClient',
+    'MonaiClient',
     'OnnxClient',
+    'GrpcClient',
     'batched_infer',
     'TileStitcher',
     'StreamDisplay',

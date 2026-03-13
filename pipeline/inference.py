@@ -1,11 +1,12 @@
-# inference.py — Triton / ONNX Runtime inference execution layer.
+# inference.py — MONAI-centered inference execution layer.
 #
-# Sends InferPacket tiles to the model backend in batched chunks
+# Sends InferPacket tiles to MONAI/ONNX backends in batched chunks
 # and fills the ``raw_output`` / ``infer_ms`` fields in-place.
 #
 # Two backends:
-#   - "triton": Triton Inference Server via gRPC (preferred in production).
-#   - "onnx":   Local ONNX Runtime session (for dev / debugging without Docker).
+#   - "monai": MONAI inferer + runtime adapter (onnx / torchscript).
+#   - "onnx":  Local ONNX Runtime direct session (fallback).
+#   - "grpc":  Remote MONAI service via gRPC.
 #
 # Usage::
 #
@@ -13,11 +14,10 @@
 #     client.infer(infer_packet)          # fills raw_output in-place
 #     assert client.health_check()
 
-import time
 import numpy as np
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Callable
 from munch import Munch
 from pipeline.monitor import tprint
 
@@ -48,80 +48,159 @@ class InferClient(ABC):
             cfg: ``config.inference`` Munch section.
 
         Returns:
-            A TritonClient or OnnxClient instance.
+            A MonaiClient or OnnxClient instance.
         """
         backend = cfg.backend.lower()
-        if backend == "triton":
-            return TritonClient(
-                url=cfg.triton_url,
-                protocol=cfg.triton_protocol,
-                model_name=cfg.model_name,
-                model_version=cfg.get("model_version", ""),
-                input_name=cfg.input_name,
-                output_name=cfg.output_name,
-                timeout_ms=cfg.timeout_ms,
+        if backend == "monai":
+            return MonaiClient(
+                model_runtime=cfg.get("model_runtime", "onnx"),
+                model_path=cfg.model_path,
+                input_name=cfg.get("input_name", "input"),
+                output_name=cfg.get("output_name", "output"),
+                device=cfg.get("device", "cuda"),
+            )
+        elif backend == "grpc":
+            return GrpcClient(
+                target=cfg.get("grpc_target", "localhost:8001"),
             )
         elif backend == "onnx":
             return OnnxClient(
-                onnx_path=cfg.onnx_path,
-                input_name=cfg.input_name,
-                output_name=cfg.output_name,
+                onnx_path=cfg.model_path,
+                input_name=cfg.get("input_name", "input"),
+                output_name=cfg.get("output_name", "output"),
             )
         else:
             raise ValueError(f"Unknown inference backend: '{backend}'. "
-                             "Use 'triton' or 'onnx'.")
+                             "Use 'monai', 'onnx', or 'grpc'.")
 
 
-class TritonClient(InferClient):
-    """Triton Inference Server client (gRPC or HTTP).
+class GrpcClient(InferClient):
+    """Remote gRPC client for StreamCat MONAI service."""
 
-    gRPC is preferred for lower per-request overhead.
+    def __init__(self, target: str = "localhost:8001"):
+        try:
+            import grpc
+        except ImportError:
+            raise ImportError("grpcio is required for gRPC backend")
+
+        from server.proto_gen import ensure_proto_generated
+
+        ensure_proto_generated()
+        from server import infer_pb2, infer_pb2_grpc
+
+        self._grpc = grpc
+        self._pb2 = infer_pb2
+        self._channel = grpc.insecure_channel(target)
+        self._stub = infer_pb2_grpc.InferenceServiceStub(self._channel)
+        self._target = target
+        tprint(f"[inference] gRPC backend connected: {target}")
+
+    def infer(self, tiles: np.ndarray) -> np.ndarray:
+        request = self._pb2.InferRequest(
+            request_id="stream-pipeline",
+            input=self._pb2.Tensor(
+                data=tiles.astype(np.float32, copy=False).tobytes(order="C"),
+                shape=list(tiles.shape),
+                dtype=str(tiles.dtype),
+            ),
+        )
+        reply = self._stub.Infer(request)
+        if reply.error:
+            raise RuntimeError(f"gRPC infer failed: {reply.error}")
+        out = np.frombuffer(reply.output.data, dtype=np.dtype(reply.output.dtype))
+        return out.reshape(tuple(reply.output.shape))
+
+    def health_check(self) -> bool:
+        try:
+            reply = self._stub.Health(self._pb2.HealthRequest())
+            return bool(reply.live and reply.ready)
+        except Exception:
+            return False
+
+
+class MonaiClient(InferClient):
+    """MONAI inference client with runtime adapters.
+
+    Supports:
+        - onnx runtime via ONNX Runtime
+        - torchscript runtime via torch.jit
     """
 
     def __init__(self,
-                 url: str = "localhost:8001",
-                 protocol: str = "grpc",
-                 model_name: str = "common_mini",
-                 model_version: str = "",
+                 model_runtime: str = "onnx",
+                 model_path: str = "",
                  input_name: str = "input",
                  output_name: str = "output",
-                 timeout_ms: int = 5000):
-        self._url = url
-        self._protocol = protocol.lower()
-        self._model_name = model_name
-        self._model_version = model_version
+                 device: str = "cuda"):
+        self._runtime = model_runtime.lower()
+        self._model_path = model_path
         self._input_name = input_name
         self._output_name = output_name
-        self._timeout = timeout_ms / 1000.0  # convert to seconds
+        self._network: Callable = None
 
-        self._client = None
-        self._client_module = None
-        self._connect()
+        import torch
+        from monai.inferers import SimpleInferer
 
-    def _connect(self) -> None:
-        """Lazily import tritonclient and create the connection."""
-        if self._protocol == "grpc":
-            try:
-                import tritonclient.grpc as grpcclient
-            except ImportError:
-                raise ImportError(
-                    "tritonclient[grpc] is required for Triton gRPC backend. "
-                    "Install with: pip install tritonclient[grpc]")
-            self._client_module = grpcclient
-            self._client = grpcclient.InferenceServerClient(url=self._url)
+        if device == "cuda" and torch.cuda.is_available():
+            self._device = torch.device("cuda")
         else:
+            self._device = torch.device("cpu")
+
+        self._inferer = SimpleInferer()
+        self._build_network()
+
+    def _build_network(self) -> None:
+        if self._runtime == "onnx":
             try:
-                import tritonclient.http as httpclient
+                import onnxruntime as ort
             except ImportError:
                 raise ImportError(
-                    "tritonclient[http] is required for Triton HTTP backend. "
-                    "Install with: pip install tritonclient[http]")
-            self._client_module = httpclient
-            self._client = httpclient.InferenceServerClient(url=self._url)
-        tprint(f"[inference] triton {self._protocol} connected: {self._url}")
+                    "MONAI onnx runtime requires onnxruntime or onnxruntime-gpu. "
+                    "Install with: pip install onnxruntime-gpu")
+
+            providers = ort.get_available_providers()
+            if "CUDAExecutionProvider" in providers and self._device.type == "cuda":
+                selected = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            else:
+                selected = ["CPUExecutionProvider"]
+
+            session = ort.InferenceSession(self._model_path, providers=selected)
+            tprint(f"[inference] MONAI backend loaded ONNX model: {self._model_path}")
+            tprint(f"[inference] ONNX providers={selected}")
+
+            def _onnx_network(x):
+                x_np = x.detach().cpu().numpy().astype(np.float32, copy=False)
+                y_np = session.run([self._output_name], {self._input_name: x_np})[0]
+                import torch
+                return torch.from_numpy(y_np).to(x.device)
+
+            self._network = _onnx_network
+
+        elif self._runtime == "torchscript":
+            try:
+                import torch
+            except ImportError:
+                raise ImportError(
+                    "MONAI torchscript runtime requires PyTorch. "
+                    "Install with: pip install torch")
+
+            model = torch.jit.load(self._model_path, map_location=self._device)
+            model.eval()
+            tprint(f"[inference] MONAI backend loaded TorchScript model: {self._model_path}")
+
+            def _torchscript_network(x):
+                return model(x)
+
+            self._network = _torchscript_network
+
+        else:
+            raise ValueError(
+                f"Unsupported MONAI runtime '{self._runtime}'. "
+                "Use 'onnx' or 'torchscript'."
+            )
 
     def infer(self, tiles: np.ndarray) -> np.ndarray:
-        """Send a batch to Triton and return the prediction array.
+        """Run MONAI inference and return the prediction array.
 
         Args:
             tiles: (N, C, H, W) float32.
@@ -129,24 +208,15 @@ class TritonClient(InferClient):
         Returns:
             (N, num_classes, H, W) float32.
         """
-        mod = self._client_module
-        inp = mod.InferInput(self._input_name, list(tiles.shape), "FP32")
-        inp.set_data_from_numpy(tiles)
+        import torch
 
-        out = mod.InferRequestedOutput(self._output_name)
-        result = self._client.infer(
-            model_name=self._model_name,
-            model_version=self._model_version,
-            inputs=[inp],
-            outputs=[out],
-        )
-        return result.as_numpy(self._output_name)
+        x = torch.from_numpy(tiles.astype(np.float32, copy=False)).to(self._device)
+        with torch.no_grad():
+            y = self._inferer(x, self._network)
+        return y.detach().cpu().numpy()
 
     def health_check(self) -> bool:
-        try:
-            return self._client.is_server_live()
-        except Exception:
-            return False
+        return self._network is not None
 
 
 class OnnxClient(InferClient):

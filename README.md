@@ -8,23 +8,46 @@ LoLA_hsViT的边缘部署部分，用RGB摄像头代替hsi数据流输入。
 ```
 bash
 
-# 按config/config.yaml配置运行(webcam + ONNX fallback)
-python run_stream.py
+# 按config/config.yaml配置运行(webcam + MONAI backend)
+python run.py
 
 # 自定义配置运行，见第3、4、5条：
-python run_stream.py -c <自定义参数>
+python run.py -c <自定义参数>
 
-# 后端用Triton：
-python run_stream.py -c < --backend / -b > triton < --triton-url / -url > localhost:8001
+# 后端用MONAI（onnx runtime）：
+python run.py -c --backend monai --model-runtime onnx
+
+# 后端用MONAI服务层（gRPC 8001）：
+python run.py -c --backend grpc --grpc-target localhost:8001
 
 # 实时视频流做输入：
-python run_stream.py -c < --source / -s > /path/to/video.mp4
+python run.py -c --source /path/to/video.mp4
 
 # 帧间隔(stride)为8，限宽1920：
-python run_stream.py -c < --stride / -stride > 8 < --max-width / -mw > 1920
+python run.py -c --stride 8 --max-width 1920
 
 # 其它自定义参数见run.py
 ```
+
+### MONAI服务层（HTTP/gRPC/Metrics）
+```
+bash
+
+# 启动MONAI服务层
+python server/app.py --config config/config.yaml
+
+# HTTP健康检查
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+
+# Metrics
+curl http://localhost:8002/metrics
+```
+
+端口约定：
+- HTTP: 8000
+- gRPC: 8001
+- Metrics: 8002
 ### 工作流
 
 ```mermaid
@@ -68,12 +91,18 @@ StreamCat/
 │   ├── monitor.py          # 栈内外监视服务
 │   ├── display.py          # 显示模块
 │   └── packets.py          # 模块间通信协议(数据传输类)
-├── server/                 # Triton Server目录
-│   ├── common_mini         # 推理实例
-│   │   ├   1  /
-│   │   │   └── model.plan  # 推理引擎文件
-│   │   └── config.pdtxt    # 引擎配置文件
-│   └── ...
+├── server/                 # MONAI服务层
+│   ├── app.py              # 服务入口
+│   ├── config.py           # 服务配置加载
+│   ├── grpc_service.py     # gRPC推理接口
+│   ├── http_api.py         # HTTP监测调试
+│   ├── metrics.py          # Prometheus指标
+│   ├── model_runtime.py    # MONAI运行时封装
+│   └── proto/              # gRPC协议定义
+├── docker/
+│   └── entrypoint.sh       # 镜像启动脚本
+├── scripts/
+│   └── gen_proto.sh        # 生成gRPC Python桩代码
 ├── src/                    # .md插图资源
 │   ├── xxx.png
 │   └── ...

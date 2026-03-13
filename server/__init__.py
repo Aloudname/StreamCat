@@ -1,0 +1,1 @@
+"""StreamCat MONAI service package."""

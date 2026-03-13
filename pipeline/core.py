@@ -119,6 +119,7 @@ class StreamPipeline:
             stride=config.preprocess.stride,
             normalize_mode=config.preprocess.normalize_mode,
             preprocessor_path=config.preprocess.get("preprocessor_path", ""),
+            model_channels=config.inference.get("model_channels", None),
         )
 
         self._infer_client = InferClient.create(config.inference)

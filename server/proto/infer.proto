@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package streamcat;
+
+message Tensor {
+  bytes data = 1;
+  repeated int64 shape = 2;
+  string dtype = 3;
+}
+
+message InferRequest {
+  string request_id = 1;
+  Tensor input = 2;
+  int64 timestamp_ns = 3;
+}
+
+message InferReply {
+  Tensor output = 1;
+  double infer_ms = 2;
+  string error = 3;
+}
+
+message HealthRequest {}
+
+message HealthReply {
+  bool live = 1;
+  bool ready = 2;
+  string message = 3;
+}
+
+service InferenceService {
+  rpc Infer(InferRequest) returns (InferReply);
+  rpc Health(HealthRequest) returns (HealthReply);
+}

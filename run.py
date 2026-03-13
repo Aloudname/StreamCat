@@ -9,8 +9,8 @@ Usage examples:
     # Custom config by arg cmd.
     python run.py --custom/-c
 
-    # Override: use Triton backend
-    python run.py -c --backend/-b triton --triton-url/-url localhost:8001
+    # Override: use MONAI backend
+    python run.py -c --backend/-b monai --model-runtime/-mr onnx
 
     # Override: use video file as input
     python run.py --source/-s /path/to/video.mp4
@@ -42,14 +42,20 @@ def parse_args():
 
     # Inference overrides
     parser.add_argument('--backend', '-b', type=str, default=None,
-                        choices=['triton', 'onnx'],
+                        choices=['monai', 'onnx', 'grpc'],
                         help='Inference backend (default: from config)')
-    parser.add_argument('--triton-url', '-url', type=str, default=None,
-                        help='Triton server gRPC URL (e.g. localhost:8001)')
-    parser.add_argument('--onnx-path', '-p', type=str, default=None,
-                        help='Path to ONNX model file')
-    parser.add_argument('--model-name', '-n', type=str, default=None,
-                        help='Triton model name')
+    parser.add_argument('--model-path', '-p', type=str, default=None,
+                        help='Path to model file (.onnx or .ts)')
+    parser.add_argument('--model-runtime', '-mr', type=str, default=None,
+                        choices=['onnx', 'torchscript'],
+                        help='Runtime used by MONAI backend')
+    parser.add_argument('--device', '-d', type=str, default=None,
+                        choices=['cuda', 'cpu'],
+                        help='Inference device for MONAI backend')
+    parser.add_argument('--model-channels', '-mc', type=int, default=None,
+                        help='Expected input channels for model (for channel adaptation)')
+    parser.add_argument('--grpc-target', '-gt', type=str, default=None,
+                        help='gRPC server target (used with --backend grpc)')
     parser.add_argument('--batch-size', '-bs', type=int, default=None,
                         help='Inference batch size')
 
@@ -77,12 +83,16 @@ def apply_overrides(cfg, args):
 
     if args.backend is not None:
         cfg.inference.backend = args.backend
-    if args.triton_url is not None:
-        cfg.inference.triton_url = args.triton_url
-    if args.onnx_path is not None:
-        cfg.inference.onnx_path = args.onnx_path
-    if args.model_name is not None:
-        cfg.inference.model_name = args.model_name
+    if args.model_path is not None:
+        cfg.inference.model_path = args.model_path
+    if args.model_runtime is not None:
+        cfg.inference.model_runtime = args.model_runtime
+    if args.device is not None:
+        cfg.inference.device = args.device
+    if args.model_channels is not None:
+        cfg.inference.model_channels = args.model_channels
+    if args.grpc_target is not None:
+        cfg.inference.grpc_target = args.grpc_target
     if args.batch_size is not None:
         cfg.inference.batch_size = args.batch_size
 
@@ -98,14 +108,13 @@ def apply_overrides(cfg, args):
 def main():
     args = parse_args()
     cfg = load_config()
-    
+
     tprint("Loading streaming config...")
     if args.custom:
         tprint("Using default config.")
         apply_overrides(cfg, args)
     else:
         tprint("Using config/config.yaml.")
-        
 
     tprint("Streaming pipeline configuration:")
     print(f"  Capture:    source={cfg.capture.source}, "
@@ -114,11 +123,15 @@ def main():
           f"stride={cfg.preprocess.stride}, mode={cfg.preprocess.normalize_mode}")
     print(f"  Inference:  backend={cfg.inference.backend}, "
           f"batch={cfg.inference.batch_size}")
-    if cfg.inference.backend == "triton":
-        print(f"              url={cfg.inference.triton_url}, "
-              f"model={cfg.inference.model_name}")
+    if cfg.inference.backend == "monai":
+        print(f"              runtime={cfg.inference.model_runtime}, "
+              f"device={cfg.inference.device}")
+        print(f"              model={cfg.inference.model_path}, "
+              f"channels={cfg.inference.model_channels}")
+    elif cfg.inference.backend == "grpc":
+        print(f"              target={cfg.inference.grpc_target}")
     else:
-        print(f"              onnx={cfg.inference.onnx_path}")
+        print(f"              onnx={cfg.inference.model_path}")
     print(f"  Display:    {cfg.display.window_name}, "
           f"alpha={cfg.display.overlay_alpha}")
 
