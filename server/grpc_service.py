@@ -4,10 +4,11 @@ from concurrent import futures
 import grpc
 import numpy as np
 
+from server.proto import infer_pb2_grpc
 from server.proto_gen import ensure_proto_generated
 
 ensure_proto_generated()
-from server import infer_pb2, infer_pb2_grpc  # noqa: E402
+from server.proto import infer_pb2  # noqa: E402
 
 
 LOGGER = logging.getLogger("streamcat.grpc")
@@ -61,8 +62,23 @@ class InferenceServicer(infer_pb2_grpc.InferenceServiceServicer):
         )
 
 
-def start_grpc_server(runtime, metrics, health_state, host: str, port: int, workers: int = 8):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
+def start_grpc_server(
+    runtime,
+    metrics,
+    health_state,
+    host: str,
+    port: int,
+    workers: int = 8,
+    max_message_mb: int = 64,
+):
+    max_bytes = int(max_message_mb) * 1024 * 1024
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=workers),
+        options=[
+            ("grpc.max_send_message_length", max_bytes),
+            ("grpc.max_receive_message_length", max_bytes),
+        ],
+    )
     infer_pb2_grpc.add_InferenceServiceServicer_to_server(
         InferenceServicer(runtime, metrics, health_state),
         server,
@@ -70,5 +86,5 @@ def start_grpc_server(runtime, metrics, health_state, host: str, port: int, work
     bind_addr = f"{host}:{port}"
     server.add_insecure_port(bind_addr)
     server.start()
-    LOGGER.info("gRPC server listening on %s", bind_addr)
+    LOGGER.info("gRPC server listening on %s (max_message_mb=%s)", bind_addr, max_message_mb)
     return server

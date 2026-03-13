@@ -34,6 +34,7 @@ from pipeline.preprocess import StreamPreprocessor
 from pipeline.monitor import LatencyTracker, StMonitor
 from pipeline.inference import InferClient, batched_infer
 from pipeline.packets import FramePacket, InferPacket, ResultPacket
+from server.stream_status import StreamStatusWriter
 
 
 # Drop-oldest bounded queue
@@ -110,6 +111,11 @@ class StreamPipeline:
             width=config.capture.width,
             height=config.capture.height,
             fps=config.capture.fps,
+            input_mode=config.capture.get("input_mode", "opencv"),
+            npy_dir=config.capture.get("npy_dir", ""),
+            npy_glob=config.capture.get("npy_glob", "*.npy"),
+            npy_loop=config.capture.get("npy_loop", True),
+            npy_fps=config.capture.get("npy_fps", 10.0),
             reconnect_attempts=config.capture.reconnect_attempts,
             reconnect_delay_sec=config.capture.reconnect_delay_sec,
         )
@@ -143,6 +149,7 @@ class StreamPipeline:
             show_latency=config.display.show_latency,
             show_class_legend=config.display.show_class_legend,
             max_display_width=config.display.max_display_width,
+            headless=config.display.get("headless", False),
         )
 
         # Monitor
@@ -153,6 +160,10 @@ class StreamPipeline:
             stop_event=self._stop_event,
             interval_sec=config.monitor.log_interval_sec,
         ) if config.monitor.enable else None
+
+        self._status_writer = StreamStatusWriter(
+            config.server.get("stream_status_file", "/tmp/streamcat_stream_status.json")
+        )
 
         tprint("[orchestrator] pipeline assembled")
 
@@ -165,6 +176,14 @@ class StreamPipeline:
         """
         if not self._capture.open():
             raise RuntimeError("Failed to open capture device")
+
+        self._status_writer.mark_started({
+            "env_profile": self._cfg.runtime.get("env_profile", "unknown"),
+            "input_mode": self._cfg.capture.get("input_mode", "opencv"),
+            "source": self._cfg.capture.get("source", ""),
+            "npy_dir": self._cfg.capture.get("npy_dir", ""),
+            "backend": self._cfg.inference.get("backend", "grpc"),
+        })
 
         # Warmup: discard first N frames to let camera auto-expose
         warmup = self._cfg.pipeline.warmup_frames
@@ -201,6 +220,7 @@ class StreamPipeline:
                 self._monitor.stop()
             self._capture.release()
             self._display.release()
+            self._status_writer.mark_stopped("pipeline stopped")
             tprint("[orchestrator] shutdown complete")
 
     # Thread bodies
@@ -243,10 +263,21 @@ class StreamPipeline:
                 post_ms = (time.monotonic() - t2) * 1000.0
                 self._tracker.record("postprocess", post_ms)
 
+                self._status_writer.update_frame(
+                    frame_id=result.frame_id,
+                    infer_ms=infer_ms,
+                    extra={
+                        "preprocess_ms": float(prep_ms),
+                        "postprocess_ms": float(post_ms),
+                        "tile_count": int(infer_pkt.tiles.shape[0]),
+                    },
+                )
+
                 self._result_q.put(result)
 
             except Exception as e:
                 tprint(f"[worker] error: {e}")
+                self._status_writer.mark_error(str(e))
 
     def _display_loop(self) -> None:
         """Main thread: pull results and render."""

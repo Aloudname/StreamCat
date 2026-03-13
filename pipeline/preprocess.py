@@ -105,6 +105,8 @@ class StreamPreprocessor:
 
         elapsed_ms = (time.monotonic() - t0) * 1000.0
 
+        preview = frame.camera_meta.get("preview_image", frame.image)
+
         return InferPacket(
             frame_id=frame.frame_id,
             timestamp=frame.timestamp,
@@ -112,7 +114,7 @@ class StreamPreprocessor:
             tile_coords=coords,
             frame_shape=(H, W),
             padded_shape=(padded_H, padded_W),
-            original_image=frame.image,
+            original_image=preview,
             preprocess_ms=elapsed_ms,
         )
 

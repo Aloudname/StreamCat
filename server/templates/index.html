@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamCat Live Inference</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f6f8f4;
+            --card: #ffffff;
+            --ink: #17201d;
+            --muted: #5e6e67;
+            --accent: #106c4a;
+            --accent-soft: #ddf4ea;
+            --border: #dbe5df;
+            --warn: #a45716;
+            --ok: #0f7a4d;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Manrope, "Noto Sans", sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 12% 20%, #eaf4ea 0%, rgba(234, 244, 234, 0) 45%),
+                radial-gradient(circle at 90% 12%, #e5f0fb 0%, rgba(229, 240, 251, 0) 42%),
+                var(--bg);
+            padding: 20px;
+        }
+        .page {
+            max-width: 1260px;
+            margin: 0 auto;
+            display: grid;
+            gap: 16px;
+        }
+        .hero {
+            background: linear-gradient(135deg, #fefefe, #f2f7f2);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 18px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            box-shadow: 0 10px 40px rgba(17, 44, 28, 0.07);
+        }
+        .hero h1 {
+            margin: 0;
+            font-size: clamp(1.3rem, 2.2vw, 2rem);
+            letter-spacing: 0.02em;
+        }
+        .hero p {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+        .status {
+            font-family: "JetBrains Mono", monospace;
+            background: var(--accent-soft);
+            color: var(--accent);
+            border-radius: 999px;
+            padding: 7px 12px;
+            font-size: 0.8rem;
+            border: 1px solid #c2e6d5;
+            white-space: nowrap;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 6px 26px rgba(16, 30, 21, 0.06);
+        }
+        .card-head {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .tag {
+            font-size: 0.72rem;
+            color: var(--muted);
+            border: 1px solid var(--border);
+            border-radius: 99px;
+            padding: 3px 8px;
+            font-family: "JetBrains Mono", monospace;
+        }
+        .frame {
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            background: #eef3ee;
+            object-fit: cover;
+            display: block;
+        }
+        .metrics {
+            padding: 12px;
+            display: grid;
+            gap: 8px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 0.82rem;
+        }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 6px;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 0 12px 12px;
+        }
+        button, select {
+            border: 1px solid #c8d9d0;
+            border-radius: 10px;
+            padding: 8px 10px;
+            font: inherit;
+            background: #ffffff;
+        }
+        button.primary {
+            border-color: #0f6e4a;
+            background: #0f6e4a;
+            color: #fff;
+        }
+        .warn { color: var(--warn); }
+        .ok { color: var(--ok); }
+        #hiddenCanvas { display: none; }
+        @media (max-width: 980px) {
+            .grid { grid-template-columns: 1fr; }
+            .hero { flex-direction: column; align-items: flex-start; }
+        }
+    </style>
+</head>
+<body>
+    <main class="page">
+        <section class="hero">
+            <div>
+                <h1>StreamCat Live Inference Dashboard</h1>
+                <p>Input flow -> service processing -> output flow</p>
+            </div>
+            <div id="statusText" class="status">INIT</div>
+        </section>
+
+        <section class="grid">
+            <article class="card">
+                <div class="card-head"><strong>Input Flow</strong><span class="tag">Camera Frame</span></div>
+                <video id="inputVideo" class="frame" autoplay muted playsinline></video>
+            </article>
+
+            <article class="card">
+                <div class="card-head"><strong>Processing Flow</strong><span class="tag">HTTP /infer</span></div>
+                <div class="metrics">
+                    <div class="metric"><span>Service</span><span id="svcReady" class="warn">checking...</span></div>
+                    <div class="metric"><span>Infer latency</span><span id="inferMs">- ms</span></div>
+                    <div class="metric"><span>Loop FPS</span><span id="loopFps">-</span></div>
+                    <div class="metric"><span>Pipeline frame</span><span id="streamFrame">-</span></div>
+                    <div class="metric"><span>Pipeline throughput</span><span id="streamFps">- fps</span></div>
+                    <div class="metric"><span>Pipeline infer</span><span id="streamInfer">- ms</span></div>
+                    <div class="metric"><span>Input tensor</span><span id="shape">-</span></div>
+                    <div class="metric"><span>Last error</span><span id="lastErr">none</span></div>
+                </div>
+                <div class="controls">
+                    <button id="startBtn" class="primary">Start</button>
+                    <button id="stopBtn">Stop</button>
+                    <label>Resolution
+                        <select id="resSel">
+                            <option value="224x224">224x224</option>
+                            <option value="256x256" selected>256x256</option>
+                            <option value="320x320">320x320</option>
+                        </select>
+                    </label>
+                </div>
+            </article>
+
+            <article class="card">
+                <div class="card-head"><strong>Output Flow</strong><span class="tag">Seg Overlay</span></div>
+                <canvas id="outputCanvas" class="frame"></canvas>
+            </article>
+        </section>
+    </main>
+
+    <canvas id="hiddenCanvas" width="256" height="256"></canvas>
+
+    <script>
+        const inputVideo = document.getElementById("inputVideo");
+        const hiddenCanvas = document.getElementById("hiddenCanvas");
+        const outputCanvas = document.getElementById("outputCanvas");
+        const hctx = hiddenCanvas.getContext("2d", { willReadFrequently: true });
+        const octx = outputCanvas.getContext("2d");
+
+        const statusText = document.getElementById("statusText");
+        const svcReady = document.getElementById("svcReady");
+        const inferMs = document.getElementById("inferMs");
+        const loopFps = document.getElementById("loopFps");
+        const shapeText = document.getElementById("shape");
+        const lastErr = document.getElementById("lastErr");
+        const streamFrame = document.getElementById("streamFrame");
+        const streamFps = document.getElementById("streamFps");
+        const streamInfer = document.getElementById("streamInfer");
+
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+        const resSel = document.getElementById("resSel");
+
+        let stream = null;
+        let running = false;
+        let lastLoopTs = performance.now();
+        let loopFpsSmooth = 0;
+
+        function setStatus(text) {
+            statusText.textContent = text;
+        }
+
+        function toB64FromBytes(bytes) {
+            let binary = "";
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+            }
+            return btoa(binary);
+        }
+
+        function fromB64ToFloat32Array(b64) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return new Float32Array(bytes.buffer);
+        }
+
+        function readResolution() {
+            const [w, h] = resSel.value.split("x").map(Number);
+            hiddenCanvas.width = w;
+            hiddenCanvas.height = h;
+            outputCanvas.width = w;
+            outputCanvas.height = h;
+            return { w, h };
+        }
+
+        async function checkReady() {
+            try {
+                const resp = await fetch("/health/ready");
+                const data = await resp.json();
+                const ok = !!data.ready;
+                svcReady.textContent = ok ? "ready" : "not-ready";
+                svcReady.className = ok ? "ok" : "warn";
+                return ok;
+            } catch (_e) {
+                svcReady.textContent = "unreachable";
+                svcReady.className = "warn";
+                return false;
+            }
+        }
+
+        async function pollStreamStatus() {
+            try {
+                const resp = await fetch("/stream/status", { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const frame = Number(data.frame_id || 0);
+                const fps = Number(data.throughput_fps || 0);
+                const inf = Number(data.recent_infer_ms || 0);
+                streamFrame.textContent = frame > 0 ? String(frame) : "-";
+                streamFps.textContent = fps > 0 ? `${fps.toFixed(2)} fps` : "- fps";
+                streamInfer.textContent = inf > 0 ? `${inf.toFixed(2)} ms` : "- ms";
+            } catch (_e) {
+                // keep UI quiet when stream process is not running
+            }
+        }
+
+        async function startCamera() {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false,
+            });
+            inputVideo.srcObject = stream;
+        }
+
+        function stopCamera() {
+            if (stream) {
+                for (const t of stream.getTracks()) t.stop();
+            }
+            stream = null;
+        }
+
+        function frameToNCHWFloat32() {
+            const { w, h } = readResolution();
+            hctx.drawImage(inputVideo, 0, 0, w, h);
+            const img = hctx.getImageData(0, 0, w, h);
+            const data = img.data;
+            const total = w * h;
+            const tensor = new Float32Array(1 * 3 * h * w);
+            const c0 = 0;
+            const c1 = total;
+            const c2 = total * 2;
+            for (let i = 0; i < total; i++) {
+                const p = i * 4;
+                tensor[c0 + i] = data[p] / 255.0;
+                tensor[c1 + i] = data[p + 1] / 255.0;
+                tensor[c2 + i] = data[p + 2] / 255.0;
+            }
+            shapeText.textContent = `[1,3,${h},${w}]`;
+            return { tensor, w, h };
+        }
+
+        function drawOutputOverlay(inputImageData, outFloat, outShape, w, h) {
+            const channels = outShape[1];
+            const hw = outShape[2] * outShape[3];
+            const outW = outShape[3];
+            const outH = outShape[2];
+
+            const overlay = new Uint8ClampedArray(w * h * 4);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const sx = Math.floor((x / w) * outW);
+                    const sy = Math.floor((y / h) * outH);
+                    const idx = sy * outW + sx;
+                    let cls = 0;
+                    if (channels > 1) {
+                        let best = -Infinity;
+                        for (let c = 0; c < channels; c++) {
+                            const v = outFloat[c * hw + idx];
+                            if (v > best) {
+                                best = v;
+                                cls = c;
+                            }
+                        }
+                    }
+                    const p = (y * w + x) * 4;
+                    if (cls === 0) {
+                        overlay[p] = 26;
+                        overlay[p + 1] = 188;
+                        overlay[p + 2] = 120;
+                        overlay[p + 3] = 110;
+                    } else {
+                        overlay[p] = 224;
+                        overlay[p + 1] = 106;
+                        overlay[p + 2] = 55;
+                        overlay[p + 3] = 110;
+                    }
+                }
+            }
+
+            const base = new ImageData(new Uint8ClampedArray(inputImageData.data), w, h);
+            octx.putImageData(base, 0, 0);
+            const over = new ImageData(overlay, w, h);
+            octx.putImageData(over, 0, 0);
+        }
+
+        async function inferOnce() {
+            const now = performance.now();
+            const dt = Math.max(1, now - lastLoopTs);
+            lastLoopTs = now;
+            const fps = 1000.0 / dt;
+            loopFpsSmooth = loopFpsSmooth === 0 ? fps : (loopFpsSmooth * 0.8 + fps * 0.2);
+            loopFps.textContent = loopFpsSmooth.toFixed(1);
+
+            const { tensor, w, h } = frameToNCHWFloat32();
+            const bytes = new Uint8Array(tensor.buffer);
+            const payload = {
+                data_b64: toB64FromBytes(bytes),
+                shape: [1, 3, h, w],
+                dtype: "float32",
+            };
+
+            const resp = await fetch("/infer", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const out = await resp.json();
+            if (out.error) {
+                throw new Error(out.error);
+            }
+
+            inferMs.textContent = `${out.infer_ms.toFixed(2)} ms`;
+            lastErr.textContent = "none";
+
+            hctx.drawImage(inputVideo, 0, 0, w, h);
+            const inputImg = hctx.getImageData(0, 0, w, h);
+            const outArr = fromB64ToFloat32Array(out.data_b64);
+            drawOutputOverlay(inputImg, outArr, out.shape, w, h);
+        }
+
+        async function loop() {
+            while (running) {
+                try {
+                    await inferOnce();
+                    setStatus("RUNNING");
+                } catch (e) {
+                    const msg = e && e.message ? e.message : String(e);
+                    lastErr.textContent = msg.slice(0, 96);
+                    setStatus("ERROR");
+                    await new Promise((r) => setTimeout(r, 500));
+                }
+                await new Promise((r) => setTimeout(r, 80));
+            }
+        }
+
+        startBtn.addEventListener("click", async () => {
+            if (running) return;
+            setStatus("CHECKING");
+            const ok = await checkReady();
+            if (!ok) {
+                setStatus("SERVICE NOT READY");
+                return;
+            }
+            try {
+                await startCamera();
+            } catch (e) {
+                lastErr.textContent = "camera unavailable";
+                setStatus("NO CAMERA");
+                return;
+            }
+            running = true;
+            setStatus("STARTED");
+            loop();
+        });
+
+        stopBtn.addEventListener("click", () => {
+            running = false;
+            stopCamera();
+            setStatus("STOPPED");
+        });
+
+        checkReady();
+        setInterval(pollStreamStatus, 1000);
+    </script>
+</body>
+</html>

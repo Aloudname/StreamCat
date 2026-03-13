@@ -6,8 +6,8 @@ import sys
 def ensure_proto_generated() -> None:
     root = pathlib.Path(__file__).resolve().parent
     proto_dir = root / "proto"
-    pb2 = root / "infer_pb2.py"
-    pb2_grpc = root / "infer_pb2_grpc.py"
+    pb2 = root / "proto/infer_pb2.py"
+    pb2_grpc = root / "proto/infer_pb2_grpc.py"
 
     if pb2.exists() and pb2_grpc.exists():
         return

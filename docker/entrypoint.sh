@@ -8,4 +8,4 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-exec python server/app.py --config "$CONFIG_PATH"
+exec python app.py --config "$CONFIG_PATH"

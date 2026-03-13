@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from typing import Callable
 from munch import Munch
 from pipeline.monitor import tprint
+from server.proto import infer_pb2_grpc
 
 
 class InferClient(ABC):
@@ -62,6 +63,7 @@ class InferClient(ABC):
         elif backend == "grpc":
             return GrpcClient(
                 target=cfg.get("grpc_target", "localhost:8001"),
+                max_message_mb=cfg.get("grpc_max_message_mb", 64),
             )
         elif backend == "onnx":
             return OnnxClient(
@@ -77,7 +79,7 @@ class InferClient(ABC):
 class GrpcClient(InferClient):
     """Remote gRPC client for StreamCat MONAI service."""
 
-    def __init__(self, target: str = "localhost:8001"):
+    def __init__(self, target: str = "localhost:8001", max_message_mb: int = 64):
         try:
             import grpc
         except ImportError:
@@ -86,14 +88,21 @@ class GrpcClient(InferClient):
         from server.proto_gen import ensure_proto_generated
 
         ensure_proto_generated()
-        from server import infer_pb2, infer_pb2_grpc
+        from server.proto import infer_pb2
 
         self._grpc = grpc
         self._pb2 = infer_pb2
-        self._channel = grpc.insecure_channel(target)
+        max_bytes = int(max_message_mb) * 1024 * 1024
+        self._channel = grpc.insecure_channel(
+            target,
+            options=[
+                ("grpc.max_send_message_length", max_bytes),
+                ("grpc.max_receive_message_length", max_bytes),
+            ],
+        )
         self._stub = infer_pb2_grpc.InferenceServiceStub(self._channel)
         self._target = target
-        tprint(f"[inference] gRPC backend connected: {target}")
+        tprint(f"[inference] gRPC backend connected: {target} (max_message_mb={max_message_mb})")
 
     def infer(self, tiles: np.ndarray) -> np.ndarray:
         request = self._pb2.InferRequest(

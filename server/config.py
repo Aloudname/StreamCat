@@ -10,7 +10,9 @@ class ServiceConfig:
     http_port: int
     grpc_host: str
     grpc_port: int
+    grpc_max_message_mb: int
     metrics_port: int
+    stream_status_file: str
     log_level: str
     model_runtime: str
     model_path: str
@@ -35,7 +37,9 @@ def load_service_config(path: str) -> ServiceConfig:
         http_port=int(srv.get("http_port", 8000)),
         grpc_host=srv.get("grpc_host", "0.0.0.0"),
         grpc_port=int(srv.get("grpc_port", 8001)),
+        grpc_max_message_mb=int(srv.get("grpc_max_message_mb", 64)),
         metrics_port=int(srv.get("metrics_port", 8002)),
+        stream_status_file=srv.get("stream_status_file", "/tmp/streamcat_stream_status.json"),
         log_level=srv.get("log_level", "INFO"),
         model_runtime=inf.get("model_runtime", "onnx"),
         model_path=inf.get("model_path", ""),

@@ -8,23 +8,9 @@ LoLA_hsViT的边缘部署部分，用RGB摄像头代替hsi数据流输入。
 ```
 bash
 
-# 按config/config.yaml配置运行(webcam + MONAI backend)
-python run.py
+python app.py --config /home/chenhaoran/StreamCat/config/config.yaml
 
-# 自定义配置运行，见第3、4、5条：
-python run.py -c <自定义参数>
-
-# 后端用MONAI（onnx runtime）：
-python run.py -c --backend monai --model-runtime onnx
-
-# 后端用MONAI服务层（gRPC 8001）：
-python run.py -c --backend grpc --grpc-target localhost:8001
-
-# 实时视频流做输入：
-python run.py -c --source /path/to/video.mp4
-
-# 帧间隔(stride)为8，限宽1920：
-python run.py -c --stride 8 --max-width 1920
+python run.py -c --env-profile server_test --backend grpc --grpc-target localhost:8001 --npy-dir /data/chenhaoran/processed_npy_64_norm --npy-glob 'bailijie_20250429_LD.npy' --npy-fps 8 --headless
 
 # 其它自定义参数见run.py
 ```

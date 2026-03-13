@@ -17,6 +17,7 @@
 import cv2
 import time
 import numpy as np
+import os
 
 from typing import List, Optional, Tuple
 from pipeline.packets import ResultPacket
@@ -44,7 +45,8 @@ class StreamDisplay:
                  show_fps: bool = True,
                  show_latency: bool = True,
                  show_class_legend: bool = True,
-                 max_display_width: int = 1280):
+                 max_display_width: int = 1280,
+                 headless: bool = False):
         """
         Args:
             window_name:       OpenCV window title.
@@ -64,6 +66,8 @@ class StreamDisplay:
         self._show_latency = show_latency
         self._show_legend = show_class_legend
         self._max_width = max_display_width
+        self._headless = headless
+        self._gui_enabled = False
 
         # FPS smoothing
         self._fps_window: List[float] = []
@@ -73,7 +77,13 @@ class StreamDisplay:
         self._overlay_on = True  # toggled by 'o' key
         self._latency_on = show_latency
 
-        cv2.namedWindow(self._window, cv2.WINDOW_NORMAL)
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if self._headless or not has_display:
+            if not has_display and not self._headless:
+                tprint("[display] no DISPLAY detected, switching to headless mode")
+        else:
+            cv2.namedWindow(self._window, cv2.WINDOW_NORMAL)
+            self._gui_enabled = True
 
     def render(self, result: ResultPacket) -> bool:
         """Render one frame and return True to continue, False to quit.
@@ -96,7 +106,7 @@ class StreamDisplay:
         fps = sum(self._fps_window) / len(self._fps_window) if self._fps_window else 0.0
 
         # -- Build display canvas --
-        canvas = result.original_image.copy()
+        canvas = self._to_bgr_canvas(result.original_image)
 
         if self._overlay_on:
             canvas = self._draw_overlay(canvas, result.segmentation_mask)
@@ -121,6 +131,9 @@ class StreamDisplay:
             canvas = cv2.resize(canvas, None, fx=scale, fy=scale,
                                 interpolation=cv2.INTER_LINEAR)
 
+        if not self._gui_enabled:
+            return True
+
         cv2.imshow(self._window, canvas)
 
         # -- Keyboard handling --
@@ -135,7 +148,8 @@ class StreamDisplay:
 
     def release(self) -> None:
         """Destroy the display window."""
-        cv2.destroyWindow(self._window)
+        if self._gui_enabled:
+            cv2.destroyWindow(self._window)
 
     # ---- drawing helpers ----
 
@@ -162,6 +176,28 @@ class StreamDisplay:
         canvas[where] = cv2.addWeighted(canvas, 1 - self._alpha,
                                          overlay, self._alpha, 0)[where]
         return canvas
+
+    @staticmethod
+    def _to_bgr_canvas(image: np.ndarray) -> np.ndarray:
+        """Convert grayscale/float/multi-channel image to displayable BGR uint8."""
+        x = np.asarray(image)
+        if x.ndim == 2:
+            x = np.stack([x, x, x], axis=2)
+        elif x.ndim == 3 and x.shape[2] == 1:
+            x = np.repeat(x, 3, axis=2)
+        elif x.ndim == 3 and x.shape[2] > 3:
+            x = x[:, :, :3]
+
+        if x.dtype != np.uint8:
+            mn = float(np.min(x))
+            mx = float(np.max(x))
+            if mx - mn < 1e-8:
+                x = np.zeros_like(x, dtype=np.float32)
+            else:
+                x = (x - mn) / (mx - mn)
+            x = (x * 255.0).clip(0, 255).astype(np.uint8)
+
+        return x.copy()
 
     def _draw_legend(self, canvas: np.ndarray, x: int, y_start: int) -> None:
         """Draw a class-colour legend in the upper-right corner."""

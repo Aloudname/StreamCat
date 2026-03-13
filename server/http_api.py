@@ -4,7 +4,11 @@ from typing import List
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.requests import Request
 from pydantic import BaseModel, Field
+from server.stream_status import read_stream_status
 
 LOGGER = logging.getLogger("streamcat.http")
 
@@ -23,8 +27,13 @@ class InferHttpReply(BaseModel):
     error: str = ""
 
 
-def create_app(runtime, metrics, health_state) -> FastAPI:
+def create_app(runtime, metrics, health_state, stream_status_file: str = "/tmp/streamcat_stream_status.json") -> FastAPI:
     app = FastAPI(title="StreamCat MONAI Service", version="0.1.0")
+    templates = Jinja2Templates(directory="server/templates")
+
+    @app.get("/")
+    def read_root(request: Request):
+        return templates.TemplateResponse("index.html", {"request": request})
 
     @app.get("/health/live")
     def live():
@@ -55,5 +64,9 @@ def create_app(runtime, metrics, health_state) -> FastAPI:
             LOGGER.exception("HTTP infer failed")
             metrics.requests_total.labels(protocol="http", status="error").inc()
             return InferHttpReply(data_b64="", shape=[], dtype="", infer_ms=0.0, error=str(exc))
+
+    @app.get("/stream/status")
+    def stream_status():
+        return read_stream_status(stream_status_file)
 
     return app

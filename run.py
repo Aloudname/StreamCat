@@ -39,6 +39,20 @@ def parse_args():
     # Capture overrides
     parser.add_argument('--source', '-s', type=str, default=None,
                         help='Capture source: device index (0,1,..) or video path')
+    parser.add_argument('--env-profile', '-ep', type=str, default=None,
+                        choices=['server_test', 'edge'],
+                        help='Runtime environment profile')
+    parser.add_argument('--input-mode', '-im', type=str, default=None,
+                        choices=['opencv', 'npy_stream', 'hsi_camera'],
+                        help='Capture input mode')
+    parser.add_argument('--npy-dir', type=str, default=None,
+                        help='Directory containing .npy files for stream testing')
+    parser.add_argument('--npy-glob', type=str, default=None,
+                        help='Glob pattern for npy files (default: *.npy)')
+    parser.add_argument('--npy-fps', type=float, default=None,
+                        help='Playback fps for npy stream mode')
+    parser.add_argument('--npy-loop', action='store_true',
+                        help='Loop npy files when reaching the end')
 
     # Inference overrides
     parser.add_argument('--backend', '-b', type=str, default=None,
@@ -68,12 +82,38 @@ def parse_args():
                         help='Max display width in pixels')
     parser.add_argument('--alpha', '-a', type=float, default=None,
                         help='Overlay transparency (0.0 - 1.0)')
+    parser.add_argument('--headless', action='store_true',
+                        help='Disable OpenCV GUI display (for server/no-display env)')
 
     return parser.parse_args()
 
 
 def apply_overrides(cfg, args):
     """Override config values from CLI arguments."""
+    if not hasattr(cfg, 'runtime') or cfg.runtime is None:
+        cfg.runtime = {}
+
+    if args.env_profile is not None:
+        cfg.runtime.env_profile = args.env_profile
+
+    if args.input_mode is not None:
+        cfg.capture.input_mode = args.input_mode
+
+    if args.npy_dir is not None:
+        cfg.capture.npy_dir = args.npy_dir
+    if args.npy_glob is not None:
+        cfg.capture.npy_glob = args.npy_glob
+    if args.npy_fps is not None:
+        cfg.capture.npy_fps = args.npy_fps
+    if args.npy_loop:
+        cfg.capture.npy_loop = True
+
+    # Apply profile defaults unless explicitly overridden
+    if cfg.runtime.get('env_profile', 'server_test') == 'server_test' and args.input_mode is None:
+        cfg.capture.input_mode = 'npy_stream'
+    if cfg.runtime.get('env_profile', 'server_test') == 'edge' and args.input_mode is None:
+        cfg.capture.input_mode = 'hsi_camera'
+
     if args.source:
         # Try to parse as int (device index), otherwise treat as file path
         try:
@@ -103,6 +143,8 @@ def apply_overrides(cfg, args):
         cfg.display.max_display_width = args.max_width
     if args.alpha is not None:
         cfg.display.overlay_alpha = args.alpha
+    if args.headless:
+        cfg.display.headless = True
 
 
 def main():
@@ -119,6 +161,12 @@ def main():
     tprint("Streaming pipeline configuration:")
     print(f"  Capture:    source={cfg.capture.source}, "
           f"{cfg.capture.width}x{cfg.capture.height} @ {cfg.capture.fps}fps")
+    print(f"              profile={cfg.runtime.get('env_profile', 'server_test')}, "
+          f"input_mode={cfg.capture.get('input_mode', 'opencv')}")
+    if cfg.capture.get('input_mode') == 'npy_stream':
+        print(f"              npy_dir={cfg.capture.get('npy_dir', '')}, "
+              f"glob={cfg.capture.get('npy_glob', '*.npy')}, "
+              f"npy_fps={cfg.capture.get('npy_fps', 10.0)}")
     print(f"  Preprocess: patch={cfg.preprocess.patch_size}, "
           f"stride={cfg.preprocess.stride}, mode={cfg.preprocess.normalize_mode}")
     print(f"  Inference:  backend={cfg.inference.backend}, "
@@ -133,7 +181,8 @@ def main():
     else:
         print(f"              onnx={cfg.inference.model_path}")
     print(f"  Display:    {cfg.display.window_name}, "
-          f"alpha={cfg.display.overlay_alpha}")
+            f"alpha={cfg.display.overlay_alpha}, "
+            f"headless={cfg.display.get('headless', False)}")
 
     pipeline = StreamPipeline(cfg)
     pipeline.run()

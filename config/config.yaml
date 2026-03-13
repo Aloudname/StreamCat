@@ -4,11 +4,19 @@
 
 capture:
   source: 0                    # 0 = default webcam, or path to video file
+  input_mode: "opencv"         # "opencv", "npy_stream", "hsi_camera"
+  npy_dir: ""                  # required when input_mode="npy_stream"
+  npy_glob: "*.npy"
+  npy_loop: true
+  npy_fps: 8.0
   width: 640
   height: 480
   fps: 30
   reconnect_attempts: 5
   reconnect_delay_sec: 1.0
+
+runtime:
+  env_profile: "server_test"   # "server_test" or "edge"
 
 preprocess:
   patch_size: 31               # training patch_size
@@ -19,10 +27,11 @@ preprocess:
 inference:
   backend: "monai"             # "monai", "onnx", or "grpc"
   model_runtime: "onnx"        # for monai backend: "onnx" or "torchscript"
-  model_path: "output/common_mini_exp/models/common_mini_exp_best.onnx"
+  model_path: "/home/chenhaoran/output/common_mini_exp03-12-2026_21-29-27/models/common_mini_exp_best.onnx"
   device: "cuda"               # "cuda"/"cpu"
-  model_channels: 3             # input_channels C
+  model_channels: 48             # input_channels C
   grpc_target: "localhost:8001" # used when backend="grpc"
+  grpc_max_message_mb: 16
   # common
   batch_size: 64               # max tiles per inference-call
   timeout_ms: 5000
@@ -34,7 +43,9 @@ server:
   http_port: 8000
   grpc_host: "0.0.0.0"
   grpc_port: 8001
+  grpc_max_message_mb: 64
   metrics_port: 8002
+  stream_status_file: "/tmp/streamcat_stream_status.json"
   log_level: "INFO"
 
 postprocess:
@@ -49,6 +60,7 @@ postprocess:
 display:
   window_name: "hsViT Interface Stream"
   overlay_alpha: 0.45
+  headless: false
   show_fps: true
   show_latency: true
   show_class_legend: true
